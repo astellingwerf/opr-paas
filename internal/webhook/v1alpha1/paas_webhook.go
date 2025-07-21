@@ -11,12 +11,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/belastingdienst/opr-paas-crypttool/pkg/crypt"
-	"github.com/belastingdienst/opr-paas/v2/api/v1alpha1"
-	"github.com/belastingdienst/opr-paas/v2/internal/config"
-	"github.com/belastingdienst/opr-paas/v2/internal/logging"
-	"github.com/belastingdienst/opr-paas/v2/internal/quota"
+	"github.com/belastingdienst/opr-paas/v3/api/v1alpha1"
+	"github.com/belastingdienst/opr-paas/v3/internal/config"
+	"github.com/belastingdienst/opr-paas/v3/internal/logging"
+	"github.com/belastingdienst/opr-paas/v3/pkg/quota"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -29,6 +30,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
+// revive:disable:line-length-limit
+const (
+	orderedListWarning = "deprecation: list %s is not alphabetically sorted. When retrieving the list, the order may differ from the order in which it was created"
+	disabledCapWarning = "deprecation: capability %s is disabled and will not be present when retrieving the Paas resource"
+)
+
 // SetupPaasWebhookWithManager registers the webhook for Paas in the manager.
 func SetupPaasWebhookWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewWebhookManagedBy(mgr).For(&v1alpha1.Paas{}).
@@ -36,7 +43,6 @@ func SetupPaasWebhookWithManager(mgr ctrl.Manager) error {
 		Complete()
 }
 
-// revive:disable:line-length-limit
 // revive:disable:unused-parameter
 
 // NOTE: The 'path' attribute must follow a specific pattern and should not be modified directly here.
@@ -144,9 +150,11 @@ func (v *PaasCustomValidator) validate(ctx context.Context, paas *v1alpha1.Paas)
 		}
 	}
 
-	warnings = append(warnings, v.validateGroups(paas.Spec.Groups)...)
-	warnings = append(warnings, v.validateQuota(paas)...)
-	warnings = append(warnings, v.validateExtraPerm(conf, paas)...)
+	warnings = append(warnings, validateGroups(paas.Spec.Groups)...)
+	warnings = append(warnings, validateQuota(paas)...)
+	warnings = append(warnings, validateExtraPerm(conf, paas)...)
+	warnings = append(warnings, validateListSorted(paas.Spec.Namespaces, field.NewPath("spec").Child("namespaces"))...)
+	warnings = append(warnings, validateDisabledCapabilities(paas.Spec.Capabilities)...)
 
 	if len(allErrs) == 0 && len(warnings) == 0 {
 		return nil, nil
@@ -352,7 +360,7 @@ func validateCustomFields(
 }
 
 // validateGroups returns a warning for any of the passed groups which contain both users and a query.
-func (*PaasCustomValidator) validateGroups(groups v1alpha1.PaasGroups) (warnings []string) {
+func validateGroups(groups v1alpha1.PaasGroups) (warnings []string) {
 	for key, grp := range groups {
 		if len(grp.Query) > 0 && len(grp.Users) > 0 {
 			warnings = append(warnings, fmt.Sprintf(
@@ -366,7 +374,7 @@ func (*PaasCustomValidator) validateGroups(groups v1alpha1.PaasGroups) (warnings
 }
 
 // validateQuota returns a warning when higher limits are configured than requests for the Paas / capability quotas.
-func (v *PaasCustomValidator) validateQuota(paas *v1alpha1.Paas) (warnings []string) {
+func validateQuota(paas *v1alpha1.Paas) (warnings []string) {
 	quotas := map[*field.Path]quota.Quota{
 		field.NewPath("spec", "quota"): paas.Spec.Quota,
 	}
@@ -397,7 +405,7 @@ func (v *PaasCustomValidator) validateQuota(paas *v1alpha1.Paas) (warnings []str
 }
 
 // validateExtraPerm returns a warning when extra permissions are requested for a capability that are not configured.
-func (v *PaasCustomValidator) validateExtraPerm(conf v1alpha1.PaasConfig, paas *v1alpha1.Paas) (warnings []string) {
+func validateExtraPerm(conf v1alpha1.PaasConfig, paas *v1alpha1.Paas) (warnings []string) {
 	for cname, c := range paas.Spec.Capabilities {
 		if c.ExtraPermissions && conf.Spec.Capabilities[cname].ExtraPermissions == nil {
 			warnings = append(warnings, fmt.Sprintf(
@@ -407,5 +415,33 @@ func (v *PaasCustomValidator) validateExtraPerm(conf v1alpha1.PaasConfig, paas *
 		}
 	}
 
+	return warnings
+}
+
+// validateListSorted returns a warning when the list is not sorted in which case the get would return something else
+// (without capability) then create
+func validateListSorted(
+	list []string,
+	label *field.Path,
+) (warnings []string) {
+	if !sort.SliceIsSorted(list, func(i, j int) bool {
+		return list[i] < list[j]
+	}) {
+		warnings = append(warnings, fmt.Sprintf(orderedListWarning, label))
+	}
+
+	return warnings
+}
+
+// validateDisabledCapabilities returns a warning when one or more capabilities have enabled set to false
+// in which case the get would return something else (without capability) then create
+func validateDisabledCapabilities(
+	capabilities v1alpha1.PaasCapabilities,
+) (warnings []string) {
+	for capName, capConfig := range capabilities {
+		if !capConfig.Enabled {
+			warnings = append(warnings, fmt.Sprintf(disabledCapWarning, capName))
+		}
+	}
 	return warnings
 }
