@@ -92,10 +92,16 @@ func (r *PaasReconciler) backendGroup(
 	paasGroupKey string,
 	group v1alpha2.PaasGroup,
 ) (*userv1.Group, error) {
+	block := config.GetConfig().Spec.FeatureFlags.GroupUserManagement == "block"
 	logger := log.Ctx(ctx)
 	logger.Debug().Msg("defining group")
 	// We don't manage groups with a query
 	if len(group.Query) != 0 {
+		return nil, nil
+	}
+
+	// Check if feature is enabled
+	if block && len(group.Users) > 0 {
 		return nil, nil
 	}
 
@@ -136,7 +142,7 @@ func (r *PaasReconciler) backendGroups(
 			return nil, err
 		}
 		if beGroup == nil {
-			continue // Skip Query groups
+			continue // Skip nil groups
 		}
 		groups = append(groups, beGroup)
 	}
@@ -187,8 +193,6 @@ func (r *PaasReconciler) reconcileGroups(
 }
 
 // deleteObsoleteGroups delete groups which are no longer desired from a Paas desired state.
-// If a Group is marked as an LDAP group, and there is no Paas referencing it,
-// the LDAP query is added to a list of to be removedLdapGroups.
 func (r *PaasReconciler) deleteObsoleteGroups(
 	ctx context.Context,
 	desiredGroups []*userv1.Group,
